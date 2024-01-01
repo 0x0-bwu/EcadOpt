@@ -1,3 +1,9 @@
 [submodule "3rdparty/ecad"]
 	path = 3rdparty/ecad
 	url = git@github.com:0x0-bwu/ecad.git
+[submodule "3rdparty/generic"]
+	path = 3rdparty/generic
+	url = git@github.com:0x0-bwu/generic.git
+[submodule "3rdparty/emesh"]
+	path = 3rdparty/emesh
+	url = git@github.com:0x0-bwu/emesh.git
