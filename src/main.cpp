@@ -4,6 +4,7 @@
 #include <cassert>
 #include <csignal>
 
+#include "generic/tools/Format.hpp"
 #include "glog/logging.h"
 #include "ceres/ceres.h"
 #include "EDataMgr.h"
@@ -250,15 +251,58 @@ Ptr<ILayoutView> SetupDesign()
 
 struct CostFunctor
 {
-    explicit CostFunctor(CPtr<ILayoutView> layout) : m_layout(layout) {}
-
+    explicit CostFunctor(CPtr<ILayoutView> layout) : m_layout(layout)
+    {
+        m_compIdxMap = std::unordered_map<size_t, std::string>{
+            {0, "Inst1/M1"}, {1, "Inst2/M1"}, {2, "Inst3/M1"}, {3, "Inst1/M2"}, {4, "Inst2/M2"}, {5, "Inst3/M2"}
+        };
+    }
 
     bool operator() (const double* const parameters, double* residual) const
     {
-        return false;
+        std::cout << "test paras: ";
+        for (size_t i = 0; i < 12; ++i) {
+            std::cout << parameters[i] << ", ";
+        }
+        for (size_t i = 0; i < 12; ++i) {
+            if (parameters[i] < 0 || 1 < parameters[i]) return false;
+        }
+        std::cout << std::endl;
+        auto clone = m_layout->Clone();
+        const auto & coordUnits = m_layout->GetCoordUnits();
+        for (size_t i = 0; i < 3; ++i) {
+            auto comp = clone->FindComponentByName(m_compIdxMap.at(i));
+            ECAD_TRACE("comp: %1%", comp->GetName())
+            FVector2D shift(parameters[i * 2 + 0] * 10300, parameters[i * 2 + 1] * 4350);
+            auto transform = EDataMgr::Instance().CreateTransform2D(coordUnits, 1.0, 0.0, shift);
+            comp->AddTransform(transform);
+        }
+
+        for (size_t i = 3; i < 6; ++i) {
+            auto comp = clone->FindComponentByName(m_compIdxMap.at(i));
+            ECAD_TRACE("comp: %1%", comp->GetName())
+            FVector2D shift(parameters[i * 2 + 0] * 3250, parameters[i * 2 + 1] * 4200);
+            auto transform = EDataMgr::Instance().CreateTransform2D(coordUnits, 1.0, 0.0, shift);
+            comp->AddTransform(transform);
+        }
+        EPrismaThermalModelExtractionSettings prismaSettings;
+        // prismaSettings.workDir = "/home/bing/code/EcadOpt/test";
+        prismaSettings.meshSettings.iteration = 1e5;
+        prismaSettings.meshSettings.minAlpha = 20;
+        prismaSettings.meshSettings.minLen = 1e-2;
+        prismaSettings.meshSettings.maxLen = 5000;
+
+        EThermalSimulationSetup setup;
+        setup.simuType = EThermalSimuType::Static;
+        setup.environmentTemperature = 25;
+        // setup.workDir = "/home/bing/code/EcadOpt/test";
+        residual[0] = clone->RunThermalSimulation(prismaSettings, setup); 
+
+        return true;
     }
 private:
     CPtr<ILayoutView> m_layout;
+    std::unordered_map<size_t, std::string> m_compIdxMap;
 };
 
 int main(int argc, char * argv[])
@@ -271,9 +315,30 @@ int main(int argc, char * argv[])
 
     auto layout = SetupDesign();
 
-    auto compIter = layout->GetComponentIter();
-    while (auto * comp = compIter->Next()) {
-        std::cout << comp->GetName() << std::endl;
+    std::vector<double> residual(1, 0);
+    std::vector<double> parameters(12, 0.5);
+
+    ceres::Problem problem;
+    auto costFunc = new ceres::NumericDiffCostFunction<CostFunctor, ceres::CENTRAL, 1, 12>(new CostFunctor(layout));
+    problem.AddResidualBlock(costFunc, new ceres::CauchyLoss(0.5), parameters.data());
+
+    for (size_t i = 0; i < 12; ++i) {
+        problem.SetParameterLowerBound(parameters.data(), i, 0.01);
+        problem.SetParameterUpperBound(parameters.data(), i, 0.99);
     }
+
+    ceres::Solver::Options options;
+	options.num_threads = 1;
+	options.max_num_iterations = 1e4;
+	options.minimizer_progress_to_stdout = true;
+	options.linear_solver_type = ceres::DENSE_QR;
+	options.trust_region_strategy_type = ceres::DOGLEG;
+	options.logging_type = ceres::SILENT;
+
+    ceres::Solver::Summary summary;
+    ceres::Solve(options, &problem, &summary);
+    std::cout << summary.BriefReport() << "\n";
+
+    std::cout << "paras: " << generic::fmt::Fmt2Str(parameters, ",");
     return EXIT_SUCCESS;
 }
