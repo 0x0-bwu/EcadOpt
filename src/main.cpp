@@ -4,6 +4,8 @@
 #include <cassert>
 #include <csignal>
 
+#include "generic/math/MathUtility.hpp"
+#include "generic/tools/FileSystem.hpp"
 #include "generic/tools/Format.hpp"
 #include "glog/logging.h"
 #include "ceres/ceres.h"
@@ -267,7 +269,6 @@ struct CostFunctor
         for (size_t i = 0; i < 12; ++i) {
             if (parameters[i] < 0 || 1 < parameters[i]) return false;
         }
-        std::cout << std::endl;
         auto clone = m_layout->Clone();
         const auto & coordUnits = m_layout->GetCoordUnits();
         for (size_t i = 0; i < 3; ++i) {
@@ -285,8 +286,9 @@ struct CostFunctor
             auto transform = EDataMgr::Instance().CreateTransform2D(coordUnits, 1.0, 0.0, shift);
             comp->AddTransform(transform);
         }
+
         EPrismaThermalModelExtractionSettings prismaSettings;
-        // prismaSettings.workDir = "/home/bing/code/EcadOpt/test";
+        prismaSettings.workDir = generic::fs::CurrentPath();
         prismaSettings.meshSettings.iteration = 1e5;
         prismaSettings.meshSettings.minAlpha = 20;
         prismaSettings.meshSettings.minLen = 1e-2;
@@ -295,9 +297,9 @@ struct CostFunctor
         EThermalSimulationSetup setup;
         setup.simuType = EThermalSimuType::Static;
         setup.environmentTemperature = 25;
-        // setup.workDir = "/home/bing/code/EcadOpt/test";
+        setup.workDir = prismaSettings.workDir;
         residual[0] = clone->RunThermalSimulation(prismaSettings, setup); 
-
+        std::cout << "maxT: " << residual[0] << std::endl;
         return true;
     }
 private:
@@ -305,40 +307,98 @@ private:
     std::unordered_map<size_t, std::string> m_compIdxMap;
 };
 
+// int main(int argc, char * argv[])
+// {
+//     ::signal(SIGSEGV, &SignalHandler);
+//     ::signal(SIGABRT, &SignalHandler);
+
+//     google::InitGoogleLogging(argv[0]);
+//     EDataMgr::Instance().Init();
+
+//     auto layout = SetupDesign();
+
+//     std::vector<double> residual(1, 0);
+//     std::vector<double> parameters(12, 0.5);
+
+//     ceres::Problem problem;
+//     auto costFunc = new ceres::NumericDiffCostFunction<CostFunctor, ceres::CENTRAL, 1, 12>(new CostFunctor(layout));
+//     // problem.AddResidualBlock(costFunc, new ceres::CauchyLoss(0.5), parameters.data());
+//     problem.AddResidualBlock(costFunc, nullptr, parameters.data());
+
+//     for (size_t i = 0; i < 12; ++i) {
+//         problem.SetParameterLowerBound(parameters.data(), i, 0.01);
+//         problem.SetParameterUpperBound(parameters.data(), i, 0.99);
+//     }
+
+//     ceres::Solver::Options options;
+// 	options.num_threads = 15;
+// 	options.max_num_iterations = 1e4;
+// 	options.minimizer_progress_to_stdout = true;
+// 	options.linear_solver_type = ceres::DENSE_QR;
+// 	// options.trust_region_strategy_type = ceres::DOGLEG;
+// 	options.logging_type = ceres::SILENT;
+//     options.min_line_search_step_size = 1e-3;
+
+//     ceres::Solver::Summary summary;
+//     ceres::Solve(options, &problem, &summary);
+//     std::cout << summary.BriefReport() << "\n";
+
+//     std::cout << "paras: " << generic::fmt::Fmt2Str(parameters, ",");
+//     return EXIT_SUCCESS;
+// }
+
+std::vector<double> RandomSolution()
+{
+    std::vector<double> solution(12);
+    for (auto & value : solution)
+        value = generic::math::Random<double>(0, 1);
+    return solution;
+}
+
+std::pair<std::vector<double>, double> SimulatedAnnealing(CPtr<ILayoutView> layout, double initialTemperature, double coolingRate, size_t maxIteration)
+{
+    auto currentSolution = RandomSolution();
+    double currentCost{0};
+    CostFunctor costFunctor(layout);
+    costFunctor(currentSolution.data(), &currentCost);
+    auto bestCost = currentCost;
+    auto bestSolution = currentSolution;
+    for (size_t i = 0; i < maxIteration; ++i) {
+        auto newSolution = RandomSolution();
+        double newCost;
+        CostFunctor costFunctor(layout);
+        costFunctor(newSolution.data(), &newCost);
+        
+        auto deltaCost = newCost - currentCost;
+        auto acceptanceProbability = exp(-deltaCost / initialTemperature);
+
+        if (deltaCost < 0 || acceptanceProbability > generic::math::Random<double>(0, 1) / 1.0) {
+            currentSolution = newSolution;
+            currentCost = newCost;
+        }
+
+        if (currentCost < bestCost) {
+            bestSolution = currentSolution;
+            bestCost = currentCost;
+        }
+
+        initialTemperature *= coolingRate;
+    }
+
+    return {bestSolution, bestCost};
+}
+
 int main(int argc, char * argv[])
 {
     ::signal(SIGSEGV, &SignalHandler);
     ::signal(SIGABRT, &SignalHandler);
 
-    google::InitGoogleLogging(argv[0]);
     EDataMgr::Instance().Init();
 
     auto layout = SetupDesign();
 
-    std::vector<double> residual(1, 0);
-    std::vector<double> parameters(12, 0.5);
+    auto [bestSolution, bestCost] = SimulatedAnnealing(layout, 100, 0.95, 1e3);
+    std::cout << "solution: " << generic::fmt::Fmt2Str(bestSolution, ",") << ", maxT: " << bestCost << std::endl;
 
-    ceres::Problem problem;
-    auto costFunc = new ceres::NumericDiffCostFunction<CostFunctor, ceres::CENTRAL, 1, 12>(new CostFunctor(layout));
-    problem.AddResidualBlock(costFunc, new ceres::CauchyLoss(0.5), parameters.data());
-
-    for (size_t i = 0; i < 12; ++i) {
-        problem.SetParameterLowerBound(parameters.data(), i, 0.01);
-        problem.SetParameterUpperBound(parameters.data(), i, 0.99);
-    }
-
-    ceres::Solver::Options options;
-	options.num_threads = 1;
-	options.max_num_iterations = 1e4;
-	options.minimizer_progress_to_stdout = true;
-	options.linear_solver_type = ceres::DENSE_QR;
-	options.trust_region_strategy_type = ceres::DOGLEG;
-	options.logging_type = ceres::SILENT;
-
-    ceres::Solver::Summary summary;
-    ceres::Solve(options, &problem, &summary);
-    std::cout << summary.BriefReport() << "\n";
-
-    std::cout << "paras: " << generic::fmt::Fmt2Str(parameters, ",");
     return EXIT_SUCCESS;
 }
