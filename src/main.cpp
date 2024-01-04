@@ -298,8 +298,7 @@ struct CostFunctor
         setup.simuType = EThermalSimuType::Static;
         setup.environmentTemperature = 25;
         setup.workDir = prismaSettings.workDir;
-        [[maybe_unused]] auto [minT, maxT] = clone->RunThermalSimulation(prismaSettings, setup).second; 
-        residual[0] = maxT;
+        residual[0] = clone->RunThermalSimulation(prismaSettings, setup).second;
         std::cout << "maxT: " << residual[0] << std::endl;
         return true;
     }
