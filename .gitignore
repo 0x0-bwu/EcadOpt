@@ -2,3 +2,4 @@ test
 build
 build.debug
 build.release
+.vscode/settings.json

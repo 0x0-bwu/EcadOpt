@@ -298,7 +298,8 @@ struct CostFunctor
         setup.simuType = EThermalSimuType::Static;
         setup.environmentTemperature = 25;
         setup.workDir = prismaSettings.workDir;
-        residual[0] = clone->RunThermalSimulation(prismaSettings, setup); 
+        [[maybe_unused]] auto [minT, maxT] = clone->RunThermalSimulation(prismaSettings, setup).second; 
+        residual[0] = maxT;
         std::cout << "maxT: " << residual[0] << std::endl;
         return true;
     }
@@ -307,51 +308,25 @@ private:
     std::unordered_map<size_t, std::string> m_compIdxMap;
 };
 
-// int main(int argc, char * argv[])
-// {
-//     ::signal(SIGSEGV, &SignalHandler);
-//     ::signal(SIGABRT, &SignalHandler);
-
-//     google::InitGoogleLogging(argv[0]);
-//     EDataMgr::Instance().Init();
-
-//     auto layout = SetupDesign();
-
-//     std::vector<double> residual(1, 0);
-//     std::vector<double> parameters(12, 0.5);
-
-//     ceres::Problem problem;
-//     auto costFunc = new ceres::NumericDiffCostFunction<CostFunctor, ceres::CENTRAL, 1, 12>(new CostFunctor(layout));
-//     // problem.AddResidualBlock(costFunc, new ceres::CauchyLoss(0.5), parameters.data());
-//     problem.AddResidualBlock(costFunc, nullptr, parameters.data());
-
-//     for (size_t i = 0; i < 12; ++i) {
-//         problem.SetParameterLowerBound(parameters.data(), i, 0.01);
-//         problem.SetParameterUpperBound(parameters.data(), i, 0.99);
-//     }
-
-//     ceres::Solver::Options options;
-// 	options.num_threads = 15;
-// 	options.max_num_iterations = 1e4;
-// 	options.minimizer_progress_to_stdout = true;
-// 	options.linear_solver_type = ceres::DENSE_QR;
-// 	// options.trust_region_strategy_type = ceres::DOGLEG;
-// 	options.logging_type = ceres::SILENT;
-//     options.min_line_search_step_size = 1e-3;
-
-//     ceres::Solver::Summary summary;
-//     ceres::Solve(options, &problem, &summary);
-//     std::cout << summary.BriefReport() << "\n";
-
-//     std::cout << "paras: " << generic::fmt::Fmt2Str(parameters, ",");
-//     return EXIT_SUCCESS;
-// }
-
 std::vector<double> RandomSolution()
 {
     std::vector<double> solution(12);
     for (auto & value : solution)
-        value = generic::math::Random<double>(0, 1);
+        value = generic::math::Random<double>(0.1, 0.9);
+    return solution;
+}
+
+std::vector<double> RandomNeighbour(const std::vector<double> & original, double minStep, double maxStep)
+{
+    GENERIC_ASSERT(minStep < maxStep)
+    std::vector<double> solution(original.size());
+    for (size_t i = 0; i < solution.size(); ++i) {
+        do {
+            auto step = generic::math::Random(minStep, maxStep);
+            step *= generic::math::Random<double>(0, 1) > 0.5 ? 1 : -1;
+            solution[i] = original.at(i) + step;
+        } while (solution[i] < 0.1 || 0.9 < solution[i]);
+    }
     return solution;
 }
 
@@ -364,7 +339,7 @@ std::pair<std::vector<double>, double> SimulatedAnnealing(CPtr<ILayoutView> layo
     auto bestCost = currentCost;
     auto bestSolution = currentSolution;
     for (size_t i = 0; i < maxIteration; ++i) {
-        auto newSolution = RandomSolution();
+        auto newSolution = RandomNeighbour(currentSolution, 1e-3, 1e-1);
         double newCost;
         CostFunctor costFunctor(layout);
         costFunctor(newSolution.data(), &newCost);
@@ -388,6 +363,49 @@ std::pair<std::vector<double>, double> SimulatedAnnealing(CPtr<ILayoutView> layo
     return {bestSolution, bestCost};
 }
 
+void test0(CPtr<ILayoutView> layout)
+{
+    auto [bestSolution, bestCost] = SimulatedAnnealing(layout, 100, 0.95, 1e3);
+    std::cout << "solution: " << generic::fmt::Fmt2Str(bestSolution, ",") << ", maxT: " << bestCost << std::endl;
+    CostFunctor costFunctor(layout);
+    costFunctor(bestSolution.data(), &bestCost);
+}
+
+void test1(CPtr<ILayoutView> layout)
+{
+    std::vector<double> residual(1, 0);
+    std::vector<double> parameters(12, 0.2);
+
+    ceres::Problem problem;
+    auto costFunc = new ceres::NumericDiffCostFunction<CostFunctor, ceres::FORWARD, 1, 12>(new CostFunctor(layout));
+    problem.AddResidualBlock(costFunc, new ceres::CauchyLoss(0.5), parameters.data());
+    // problem.AddResidualBlock(costFunc, nullptr, parameters.data());
+
+    for (size_t i = 0; i < 12; ++i) {
+        problem.SetParameterLowerBound(parameters.data(), i, 0.01);
+        problem.SetParameterUpperBound(parameters.data(), i, 0.99);
+    }
+
+    ceres::Solver::Options options;
+	options.num_threads = 15;
+	options.max_num_iterations = 1e4;
+	options.minimizer_progress_to_stdout = true;
+	options.linear_solver_type = ceres::DENSE_QR;
+	// options.trust_region_strategy_type = ceres::DOGLEG;
+	options.logging_type = ceres::SILENT;
+    options.check_gradients = true;
+    options.gradient_check_numeric_derivative_relative_step_size = 1e-3;
+    // options.min_line_search_step_size = 1e-1;
+    // options.min_trust_region_radius = 1e-2;
+    // options.min_lm_diagonal 1e-1;
+    // options.function_tolerance = 1e-2;
+
+    ceres::Solver::Summary summary;
+    ceres::Solve(options, &problem, &summary);
+    std::cout << summary.BriefReport() << "\n";
+    std::cout << "paras: " << generic::fmt::Fmt2Str(parameters, ",");
+}
+
 int main(int argc, char * argv[])
 {
     ::signal(SIGSEGV, &SignalHandler);
@@ -396,9 +414,7 @@ int main(int argc, char * argv[])
     EDataMgr::Instance().Init();
 
     auto layout = SetupDesign();
-
-    auto [bestSolution, bestCost] = SimulatedAnnealing(layout, 100, 0.95, 1e3);
-    std::cout << "solution: " << generic::fmt::Fmt2Str(bestSolution, ",") << ", maxT: " << bestCost << std::endl;
-
+    test0(layout);
+    
     return EXIT_SUCCESS;
 }
