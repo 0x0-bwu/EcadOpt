@@ -294,8 +294,7 @@ struct CostFunctor
         prismaSettings.meshSettings.minLen = 1e-2;
         prismaSettings.meshSettings.maxLen = 5000;
 
-        EThermalSimulationSetup setup;
-        setup.simuType = EThermalSimuType::Static;
+        EThermalStaticSimulationSetup setup;
         setup.environmentTemperature = 25;
         setup.workDir = prismaSettings.workDir;
         residual[0] = clone->RunThermalSimulation(prismaSettings, setup).second;
