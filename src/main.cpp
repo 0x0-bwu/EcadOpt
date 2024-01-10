@@ -5,12 +5,12 @@
 #include <csignal>
 
 #ifdef ECAD_CERES_SOLVER_SUPPORT
+#include "glog/logging.h"
 #include "ceres/ceres.h"
 #endif//ECAD_CERES_SOLVER_SUPPORT
 #include "generic/math/MathUtility.hpp"
 #include "generic/tools/FileSystem.hpp"
 #include "generic/tools/Format.hpp"
-#include "glog/logging.h"
 #include "EDataMgr.h"
 
 using namespace ecad;
