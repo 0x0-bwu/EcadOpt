@@ -4,9 +4,13 @@
 #include <cassert>
 #include <csignal>
 
+#ifdef ECAD_CERES_SOLVER_SUPPORT
+#include "ceres/ceres.h"
+#endif//ECAD_CERES_SOLVER_SUPPORT
+#include "generic/math/MathUtility.hpp"
+#include "generic/tools/FileSystem.hpp"
 #include "generic/tools/Format.hpp"
 #include "glog/logging.h"
-#include "ceres/ceres.h"
 #include "EDataMgr.h"
 
 using namespace ecad;
@@ -267,7 +271,6 @@ struct CostFunctor
         for (size_t i = 0; i < 12; ++i) {
             if (parameters[i] < 0 || 1 < parameters[i]) return false;
         }
-        std::cout << std::endl;
         auto clone = m_layout->Clone();
         const auto & coordUnits = m_layout->GetCoordUnits();
         for (size_t i = 0; i < 3; ++i) {
@@ -285,19 +288,19 @@ struct CostFunctor
             auto transform = EDataMgr::Instance().CreateTransform2D(coordUnits, 1.0, 0.0, shift);
             comp->AddTransform(transform);
         }
+
         EPrismaThermalModelExtractionSettings prismaSettings;
-        // prismaSettings.workDir = "/home/bing/code/EcadOpt/test";
+        prismaSettings.workDir = generic::fs::CurrentPath();
         prismaSettings.meshSettings.iteration = 1e5;
         prismaSettings.meshSettings.minAlpha = 20;
         prismaSettings.meshSettings.minLen = 1e-2;
         prismaSettings.meshSettings.maxLen = 5000;
 
-        EThermalSimulationSetup setup;
-        setup.simuType = EThermalSimuType::Static;
+        EThermalStaticSimulationSetup setup;
         setup.environmentTemperature = 25;
-        // setup.workDir = "/home/bing/code/EcadOpt/test";
-        residual[0] = clone->RunThermalSimulation(prismaSettings, setup); 
-
+        setup.workDir = prismaSettings.workDir;
+        residual[0] = clone->RunThermalSimulation(prismaSettings, setup).second;
+        std::cout << "maxT: " << residual[0] << std::endl;
         return true;
     }
 private:
@@ -305,22 +308,79 @@ private:
     std::unordered_map<size_t, std::string> m_compIdxMap;
 };
 
-int main(int argc, char * argv[])
+std::vector<double> RandomSolution()
 {
-    ::signal(SIGSEGV, &SignalHandler);
-    ::signal(SIGABRT, &SignalHandler);
+    std::vector<double> solution(12);
+    for (auto & value : solution)
+        value = generic::math::Random<double>(0.1, 0.9);
+    return solution;
+}
 
-    google::InitGoogleLogging(argv[0]);
-    EDataMgr::Instance().Init();
+std::vector<double> RandomNeighbour(const std::vector<double> & original, double minStep, double maxStep)
+{
+    GENERIC_ASSERT(minStep < maxStep)
+    std::vector<double> solution(original.size());
+    for (size_t i = 0; i < solution.size(); ++i) {
+        do {
+            auto step = generic::math::Random(minStep, maxStep);
+            step *= generic::math::Random<double>(0, 1) > 0.5 ? 1 : -1;
+            solution[i] = original.at(i) + step;
+        } while (solution[i] < 0.1 || 0.9 < solution[i]);
+    }
+    return solution;
+}
 
-    auto layout = SetupDesign();
+std::pair<std::vector<double>, double> SimulatedAnnealing(CPtr<ILayoutView> layout, double initialTemperature, double coolingRate, size_t maxIteration)
+{
+    auto currentSolution = RandomSolution();
+    double currentCost{0};
+    CostFunctor costFunctor(layout);
+    costFunctor(currentSolution.data(), &currentCost);
+    auto bestCost = currentCost;
+    auto bestSolution = currentSolution;
+    for (size_t i = 0; i < maxIteration; ++i) {
+        auto newSolution = RandomNeighbour(currentSolution, 1e-3, 1e-1);
+        double newCost;
+        CostFunctor costFunctor(layout);
+        costFunctor(newSolution.data(), &newCost);
+        
+        auto deltaCost = newCost - currentCost;
+        auto acceptanceProbability = exp(-deltaCost / initialTemperature);
 
+        if (deltaCost < 0 || acceptanceProbability > generic::math::Random<double>(0, 1) / 1.0) {
+            currentSolution = newSolution;
+            currentCost = newCost;
+        }
+
+        if (currentCost < bestCost) {
+            bestSolution = currentSolution;
+            bestCost = currentCost;
+        }
+
+        initialTemperature *= coolingRate;
+    }
+
+    return {bestSolution, bestCost};
+}
+
+void test0(CPtr<ILayoutView> layout)
+{
+    auto [bestSolution, bestCost] = SimulatedAnnealing(layout, 100, 0.95, 1e3);
+    std::cout << "solution: " << generic::fmt::Fmt2Str(bestSolution, ",") << ", maxT: " << bestCost << std::endl;
+    CostFunctor costFunctor(layout);
+    costFunctor(bestSolution.data(), &bestCost);
+}
+
+#ifdef ECAD_CERES_SOLVER_SUPPORT
+void test1(CPtr<ILayoutView> layout)
+{
     std::vector<double> residual(1, 0);
-    std::vector<double> parameters(12, 0.5);
+    std::vector<double> parameters(12, 0.2);
 
     ceres::Problem problem;
-    auto costFunc = new ceres::NumericDiffCostFunction<CostFunctor, ceres::CENTRAL, 1, 12>(new CostFunctor(layout));
+    auto costFunc = new ceres::NumericDiffCostFunction<CostFunctor, ceres::FORWARD, 1, 12>(new CostFunctor(layout));
     problem.AddResidualBlock(costFunc, new ceres::CauchyLoss(0.5), parameters.data());
+    // problem.AddResidualBlock(costFunc, nullptr, parameters.data());
 
     for (size_t i = 0; i < 12; ++i) {
         problem.SetParameterLowerBound(parameters.data(), i, 0.01);
@@ -328,17 +388,39 @@ int main(int argc, char * argv[])
     }
 
     ceres::Solver::Options options;
-	options.num_threads = 1;
+	options.num_threads = 15;
 	options.max_num_iterations = 1e4;
 	options.minimizer_progress_to_stdout = true;
 	options.linear_solver_type = ceres::DENSE_QR;
-	options.trust_region_strategy_type = ceres::DOGLEG;
+	// options.trust_region_strategy_type = ceres::DOGLEG;
 	options.logging_type = ceres::SILENT;
+    options.check_gradients = true;
+    options.gradient_check_numeric_derivative_relative_step_size = 1e-3;
+    // options.min_line_search_step_size = 1e-1;
+    // options.min_trust_region_radius = 1e-2;
+    // options.min_lm_diagonal 1e-1;
+    // options.function_tolerance = 1e-2;
 
     ceres::Solver::Summary summary;
     ceres::Solve(options, &problem, &summary);
     std::cout << summary.BriefReport() << "\n";
-
     std::cout << "paras: " << generic::fmt::Fmt2Str(parameters, ",");
+}
+#endif//ECAD_CERES_SOLVER_SUPPORT
+
+int main(int argc, char * argv[])
+{
+    ::signal(SIGSEGV, &SignalHandler);
+    ::signal(SIGABRT, &SignalHandler);
+
+    EDataMgr::Instance().Init();
+
+    auto layout = SetupDesign();
+    test0(layout);
+
+#ifdef ECAD_CERES_SOLVER_SUPPORT
+    test1(layout);
+#endif//ECAD_CERES_SOLVER_SUPPORT
+
     return EXIT_SUCCESS;
 }
