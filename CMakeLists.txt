@@ -103,7 +103,6 @@ set_target_properties(boost_serialization PROPERTIES IMPORTED_LOCATION ${BOOST_S
 # Find package
 find_package(OpenMP)
 find_package(PNG REQUIRED)
-find_package(Ceres REQUIRED)
 find_package(Threads REQUIRED)
 
 if(OpenMP_CXX_FOUND)

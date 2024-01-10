@@ -1,3 +1,10 @@
 add_executable(test.exe main.cpp)
 target_include_directories(test.exe PRIVATE ${PROJECT_SOURCE_DIR}/src)
-target_link_libraries(test.exe PRIVATE Ecad Threads::Threads Ceres::ceres dl)
+target_link_libraries(test.exe PRIVATE Ecad Threads::Threads dl)
+
+set(ECAD_CERES_SOLVER_SUPPORT OFF CACHE BOOL "Enables google ceres solver in optimization")
+if(ECAD_CERES_SOLVER_SUPPORT)
+    add_compile_definition(ECAD_CERES_SOLVER_SUPPORT)
+    find_package(Ceres REQUIRED)
+    target_link_libraries(test.exe PRIVATE Ceres::ceres)
+endif()

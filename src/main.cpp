@@ -4,11 +4,13 @@
 #include <cassert>
 #include <csignal>
 
+#ifdef ECAD_CERES_SOLVER_SUPPORT
+#include "ceres/ceres.h"
+#endif//ECAD_CERES_SOLVER_SUPPORT
 #include "generic/math/MathUtility.hpp"
 #include "generic/tools/FileSystem.hpp"
 #include "generic/tools/Format.hpp"
 #include "glog/logging.h"
-#include "ceres/ceres.h"
 #include "EDataMgr.h"
 
 using namespace ecad;
@@ -369,6 +371,7 @@ void test0(CPtr<ILayoutView> layout)
     costFunctor(bestSolution.data(), &bestCost);
 }
 
+#ifdef ECAD_CERES_SOLVER_SUPPORT
 void test1(CPtr<ILayoutView> layout)
 {
     std::vector<double> residual(1, 0);
@@ -403,6 +406,7 @@ void test1(CPtr<ILayoutView> layout)
     std::cout << summary.BriefReport() << "\n";
     std::cout << "paras: " << generic::fmt::Fmt2Str(parameters, ",");
 }
+#endif//ECAD_CERES_SOLVER_SUPPORT
 
 int main(int argc, char * argv[])
 {
@@ -413,6 +417,10 @@ int main(int argc, char * argv[])
 
     auto layout = SetupDesign();
     test0(layout);
-    
+
+#ifdef ECAD_CERES_SOLVER_SUPPORT
+    test1(layout);
+#endif//ECAD_CERES_SOLVER_SUPPORT
+
     return EXIT_SUCCESS;
 }
