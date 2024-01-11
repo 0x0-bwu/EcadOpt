@@ -253,9 +253,9 @@ Ptr<ILayoutView> SetupDesign()
     return topCell->GetFlattenedLayoutView();
 }
 
-struct CostFunctor
+struct StaticCostFunctor
 {
-    explicit CostFunctor(CPtr<ILayoutView> layout) : m_layout(layout)
+    explicit StaticCostFunctor(CPtr<ILayoutView> layout) : m_layout(layout)
     {
         m_compIdxMap = std::unordered_map<size_t, std::string>{
             {0, "Inst1/M1"}, {1, "Inst2/M1"}, {2, "Inst3/M1"}, {3, "Inst1/M2"}, {4, "Inst2/M2"}, {5, "Inst3/M2"}
@@ -308,6 +308,64 @@ private:
     std::unordered_map<size_t, std::string> m_compIdxMap;
 };
 
+struct TansientCostFunctor
+{
+    explicit TansientCostFunctor(CPtr<ILayoutView> layout) : m_layout(layout)
+    {
+        m_compIdxMap = std::unordered_map<size_t, std::string>{
+            {0, "Inst1/M1"}, {1, "Inst2/M1"}, {2, "Inst3/M1"}, {3, "Inst1/M2"}, {4, "Inst2/M2"}, {5, "Inst3/M2"}
+        };
+    }
+
+    bool operator() (const double* const parameters, double* residual) const
+    {
+        std::cout << "test paras: ";
+        for (size_t i = 0; i < 12; ++i) {
+            std::cout << parameters[i] << ", ";
+        }
+        for (size_t i = 0; i < 12; ++i) {
+            if (parameters[i] < 0 || 1 < parameters[i]) return false;
+        }
+        auto clone = m_layout->Clone();
+        const auto & coordUnits = m_layout->GetCoordUnits();
+        for (size_t i = 0; i < 3; ++i) {
+            auto comp = clone->FindComponentByName(m_compIdxMap.at(i));
+            ECAD_TRACE("comp: %1%", comp->GetName())
+            FVector2D shift(parameters[i * 2 + 0] * 10300, parameters[i * 2 + 1] * 4350);
+            auto transform = EDataMgr::Instance().CreateTransform2D(coordUnits, 1.0, 0.0, shift);
+            comp->AddTransform(transform);
+        }
+
+        for (size_t i = 3; i < 6; ++i) {
+            auto comp = clone->FindComponentByName(m_compIdxMap.at(i));
+            ECAD_TRACE("comp: %1%", comp->GetName())
+            FVector2D shift(parameters[i * 2 + 0] * 3250, parameters[i * 2 + 1] * 4200);
+            auto transform = EDataMgr::Instance().CreateTransform2D(coordUnits, 1.0, 0.0, shift);
+            comp->AddTransform(transform);
+        }
+
+        EPrismaThermalModelExtractionSettings prismaSettings;
+        prismaSettings.workDir = generic::fs::CurrentPath();
+        prismaSettings.meshSettings.iteration = 1e5;
+        prismaSettings.meshSettings.minAlpha = 20;
+        prismaSettings.meshSettings.minLen = 1e-2;
+        prismaSettings.meshSettings.maxLen = 5000;
+
+        EThermalTransientSimulationSetup setup;
+        setup.workDir = prismaSettings.workDir;
+        setup.environmentTemperature = 25;
+        setup.mor = false;
+        
+        auto [minT, maxT] = clone->RunThermalSimulation(prismaSettings, setup);
+        residual[0] = maxT - minT;
+        std::cout << "minT: " << minT << ", maxT: " << maxT << std::endl;
+        return true;
+    }
+private:
+    CPtr<ILayoutView> m_layout;
+    std::unordered_map<size_t, std::string> m_compIdxMap;
+};
+
 std::vector<double> RandomSolution()
 {
     std::vector<double> solution(12);
@@ -330,6 +388,7 @@ std::vector<double> RandomNeighbour(const std::vector<double> & original, double
     return solution;
 }
 
+template <typename CostFunctor>
 std::pair<std::vector<double>, double> SimulatedAnnealing(CPtr<ILayoutView> layout, double initialTemperature, double coolingRate, size_t maxIteration)
 {
     auto currentSolution = RandomSolution();
@@ -363,16 +422,14 @@ std::pair<std::vector<double>, double> SimulatedAnnealing(CPtr<ILayoutView> layo
     return {bestSolution, bestCost};
 }
 
-void test0(CPtr<ILayoutView> layout)
+void testStatic(CPtr<ILayoutView> layout)
 {
-    auto [bestSolution, bestCost] = SimulatedAnnealing(layout, 100, 0.95, 1e3);
+    auto [bestSolution, bestCost] = SimulatedAnnealing<StaticCostFunctor>(layout, 100, 0.95, 1e3);
     std::cout << "solution: " << generic::fmt::Fmt2Str(bestSolution, ",") << ", maxT: " << bestCost << std::endl;
-    CostFunctor costFunctor(layout);
-    costFunctor(bestSolution.data(), &bestCost);
 }
 
 #ifdef ECAD_CERES_SOLVER_SUPPORT
-void test1(CPtr<ILayoutView> layout)
+void testStaticCeres(CPtr<ILayoutView> layout)
 {
     std::vector<double> residual(1, 0);
     std::vector<double> parameters(12, 0.2);
@@ -408,6 +465,14 @@ void test1(CPtr<ILayoutView> layout)
 }
 #endif//ECAD_CERES_SOLVER_SUPPORT
 
+void testTrans(CPtr<ILayoutView> layout)
+{  
+    TansientCostFunctor costFunctor(layout);
+    std::vector<EFloat> parameters(12, 0.5);
+    EFloat residual;
+    costFunctor(parameters.data(), &residual);
+}
+
 int main(int argc, char * argv[])
 {
     ::signal(SIGSEGV, &SignalHandler);
@@ -416,10 +481,11 @@ int main(int argc, char * argv[])
     EDataMgr::Instance().Init();
 
     auto layout = SetupDesign();
-    test0(layout);
+    testStatic(layout);
+    // testTrans(layout);
 
 #ifdef ECAD_CERES_SOLVER_SUPPORT
-    test1(layout);
+    testStaticCeres(layout);
 #endif//ECAD_CERES_SOLVER_SUPPORT
 
     return EXIT_SUCCESS;
