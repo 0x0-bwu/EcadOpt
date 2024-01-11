@@ -354,8 +354,17 @@ struct TansientCostFunctor
         EThermalTransientSimulationSetup setup;
         setup.workDir = prismaSettings.workDir;
         setup.environmentTemperature = 25;
-        setup.mor = false;
-        
+        setup.settings.mor = false;
+        setup.settings.adaptive = true;
+        setup.settings.dumpRawData = true;
+        setup.settings.duration = 5;
+        setup.settings.step = 0.1;
+        setup.settings.samplingWindow = 0.5;
+        setup.settings.minSamplingInterval = 0.001;
+        setup.settings.absoluteError = 1e-1;
+        setup.settings.relativeError = 1e-1;
+        EThermalTransientExcitation excitation = [](EFloat t){ return std::abs(std::sin(generic::math::pi * t / 0.5)); };
+        setup.settings.excitation = &excitation;
         auto [minT, maxT] = clone->RunThermalSimulation(prismaSettings, setup);
         residual[0] = maxT - minT;
         std::cout << "minT: " << minT << ", maxT: " << maxT << std::endl;
@@ -478,11 +487,11 @@ int main(int argc, char * argv[])
     ::signal(SIGSEGV, &SignalHandler);
     ::signal(SIGABRT, &SignalHandler);
 
-    EDataMgr::Instance().Init();
+    EDataMgr::Instance().Init(ELogLevel::Trace);
 
     auto layout = SetupDesign();
-    testStatic(layout);
-    // testTrans(layout);
+    // testStatic(layout);
+    testTrans(layout);
 
 #ifdef ECAD_CERES_SOLVER_SUPPORT
     testStaticCeres(layout);
