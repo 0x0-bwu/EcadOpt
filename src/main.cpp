@@ -8,6 +8,7 @@
 #include "glog/logging.h"
 #include "ceres/ceres.h"
 #endif//ECAD_CERES_SOLVER_SUPPORT
+#include "generic/thread/ThreadPool.hpp"
 #include "generic/math/MathUtility.hpp"
 #include "generic/tools/FileSystem.hpp"
 #include "generic/tools/Format.hpp"
@@ -255,9 +256,10 @@ Ptr<ILayoutView> SetupDesign()
 
 struct StaticCostFunctor
 {
+    inline static constexpr size_t PARR_NUM = 15;
     explicit StaticCostFunctor(CPtr<ILayoutView> layout) : m_layout(layout)
     {
-        m_compIdxMap = std::unordered_map<size_t, std::string>{
+        m_compIdxMap = {
             {0, "Inst1/M1"}, {1, "Inst2/M1"}, {2, "Inst3/M1"}, {3, "Inst1/M2"}, {4, "Inst2/M2"}, {5, "Inst3/M2"}
         };
     }
@@ -308,42 +310,35 @@ private:
     std::unordered_map<size_t, std::string> m_compIdxMap;
 };
 
-struct TansientCostFunctor
+struct TransientCostFunctor
 {
-    explicit TansientCostFunctor(CPtr<ILayoutView> layout) : m_layout(layout)
+    inline static constexpr size_t PARR_NUM = 3;
+    explicit TransientCostFunctor(CPtr<ILayoutView> layout) : m_layout(layout)
     {
-        m_compIdxMap = std::unordered_map<size_t, std::string>{
+        m_compIdxMap = {
             {0, "Inst1/M1"}, {1, "Inst2/M1"}, {2, "Inst3/M1"}, {3, "Inst1/M2"}, {4, "Inst2/M2"}, {5, "Inst3/M2"}
         };
+        // m_lyrParaIdxMap = { {"TopCu", 12}, {"Substrate", 13}, {"CuPlate", 14}}
+        m_lyrParaIdxMap = { {"TopCu", 0}, {"Substrate", 1}, {"CuPlate", 2} }; 
     }
 
     bool operator() (const double* const parameters, double* residual) const
     {
         std::cout << "test paras: ";
-        for (size_t i = 0; i < 12; ++i) {
+        for (size_t i = 0; i < PARR_NUM; ++i) {
             std::cout << parameters[i] << ", ";
-        }
-        for (size_t i = 0; i < 12; ++i) {
             if (parameters[i] < 0 || 1 < parameters[i]) return false;
         }
+        std::cout << std::endl;
+
         auto clone = m_layout->Clone();
-        const auto & coordUnits = m_layout->GetCoordUnits();
-        for (size_t i = 0; i < 3; ++i) {
-            auto comp = clone->FindComponentByName(m_compIdxMap.at(i));
-            ECAD_TRACE("comp: %1%", comp->GetName())
-            FVector2D shift(parameters[i * 2 + 0] * 10300, parameters[i * 2 + 1] * 4350);
-            auto transform = EDataMgr::Instance().CreateTransform2D(coordUnits, 1.0, 0.0, shift);
-            comp->AddTransform(transform);
+        for (const auto & [lyrName, index] : m_lyrParaIdxMap) {
+            auto layer = clone->FindLayerByName(lyrName); { ECAD_ASSERT(layer) }
+            auto stackupLayer = layer->GetStackupLayerFromLayer(); { ECAD_ASSERT(layer) }
+            clone->ModifyStackupLayerThickness(lyrName, stackupLayer->GetThickness() + parameters[index] * 1000);
+            std::cout << "layer " << lyrName << " 's thickness: " << stackupLayer->GetThickness() << std::endl;
         }
-
-        for (size_t i = 3; i < 6; ++i) {
-            auto comp = clone->FindComponentByName(m_compIdxMap.at(i));
-            ECAD_TRACE("comp: %1%", comp->GetName())
-            FVector2D shift(parameters[i * 2 + 0] * 3250, parameters[i * 2 + 1] * 4200);
-            auto transform = EDataMgr::Instance().CreateTransform2D(coordUnits, 1.0, 0.0, shift);
-            comp->AddTransform(transform);
-        }
-
+        
         EPrismaThermalModelExtractionSettings prismaSettings;
         prismaSettings.workDir = generic::fs::CurrentPath();
         prismaSettings.meshSettings.iteration = 1e5;
@@ -352,32 +347,33 @@ struct TansientCostFunctor
         prismaSettings.meshSettings.maxLen = 5000;
 
         EThermalTransientSimulationSetup setup;
-        setup.workDir = prismaSettings.workDir;
+        setup.workDir = prismaSettings.workDir + ECAD_SEPS + std::to_string(parameters[1] * 100);
         setup.environmentTemperature = 25;
         setup.settings.mor = false;
         setup.settings.adaptive = true;
         setup.settings.dumpRawData = true;
-        setup.settings.duration = 5;
-        setup.settings.step = 0.1;
-        setup.settings.samplingWindow = 0.5;
-        setup.settings.minSamplingInterval = 0.001;
+        setup.settings.duration = 1;
+        setup.settings.step = 0.01;
+        setup.settings.samplingWindow = 0.1;
+        setup.settings.minSamplingInterval = 0.0005;
         setup.settings.absoluteError = 1e-1;
         setup.settings.relativeError = 1e-1;
-        EThermalTransientExcitation excitation = [](EFloat t){ return std::abs(std::sin(generic::math::pi * t / 0.5)); };
+        EThermalTransientExcitation excitation = [](EFloat t){ return std::abs(std::sin(generic::math::pi * t / 0.05)); };
         setup.settings.excitation = &excitation;
         auto [minT, maxT] = clone->RunThermalSimulation(prismaSettings, setup);
         residual[0] = maxT - minT;
-        std::cout << "minT: " << minT << ", maxT: " << maxT << std::endl;
+        std::cout << "minT: " << minT << ", maxT: " << maxT << ", dT: " << maxT - minT << std::endl;
         return true;
     }
 private:
     CPtr<ILayoutView> m_layout;
     std::unordered_map<size_t, std::string> m_compIdxMap;
+    std::unordered_map<std::string, size_t> m_lyrParaIdxMap;
 };
 
-std::vector<double> RandomSolution()
+std::vector<double> RandomSolution(size_t paraNums)
 {
-    std::vector<double> solution(12);
+    std::vector<double> solution(paraNums);
     for (auto & value : solution)
         value = generic::math::Random<double>(0.1, 0.9);
     return solution;
@@ -400,7 +396,7 @@ std::vector<double> RandomNeighbour(const std::vector<double> & original, double
 template <typename CostFunctor>
 std::pair<std::vector<double>, double> SimulatedAnnealing(CPtr<ILayoutView> layout, double initialTemperature, double coolingRate, size_t maxIteration)
 {
-    auto currentSolution = RandomSolution();
+    auto currentSolution = RandomSolution(CostFunctor::PARR_NUM);
     double currentCost{0};
     CostFunctor costFunctor(layout);
     costFunctor(currentSolution.data(), &currentCost);
@@ -476,10 +472,20 @@ void testStaticCeres(CPtr<ILayoutView> layout)
 
 void testTrans(CPtr<ILayoutView> layout)
 {  
-    TansientCostFunctor costFunctor(layout);
-    std::vector<EFloat> parameters(12, 0.5);
-    EFloat residual;
-    costFunctor(parameters.data(), &residual);
+    // auto [bestSolution, bestCost] = SimulatedAnnealing<TransientCostFunctor>(layout, 100, 0.95, 1e3);
+    // std::cout << "solution: " << generic::fmt::Fmt2Str(bestSolution, ",") << ", maxT: " << bestCost << std::endl;
+
+    std::vector<TransientCostFunctor> costFunctors(10, TransientCostFunctor(layout));
+    std::vector<std::vector<double> > paras;
+    for (size_t i = 0; i < 10; ++i)
+        paras.emplace_back(std::vector<double>{0.0, 0.1 * i, 0.0, 0.0});
+
+    generic::thread::ThreadPool pool;
+    for (size_t i = 0; i < 10; ++i) {
+        pool.Submit([&]{
+            costFunctors.at(i)(paras.at(i).data(), &paras.at(i).back());
+        });
+    }
 }
 
 int main(int argc, char * argv[])
